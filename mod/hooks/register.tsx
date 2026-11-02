@@ -12,7 +12,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Connection, Incoming, Outgoing } from '../types'
+import type { Answering, Connection, Incoming, Outgoing } from '../types'
 import {
   MAX_TEXT,
   cleanText,
@@ -41,6 +41,7 @@ import {
   preview,
   readConfig,
   relayUrlProblem,
+  replyLines,
   type Config,
 } from './util'
 
@@ -64,6 +65,12 @@ const connection = atom(
   { status: 'connecting', handle: null, detail: null } as Connection,
   { shape: 'connection-1' },
 )
+
+// Messages delivered straight to Claude whose answer must go back: in
+// session state, so a reload of the mod mid-turn does not lose them.
+const answering = atom({ plugin: 'crosstalk', key: 'answering' } as const, [] as Answering[], {
+  shape: 'answering-1',
+})
 
 // Session-local state. The module is evaluated afresh on every reload, and
 // session.start runs again then, so these start over with it.
@@ -229,8 +236,11 @@ async function poll($: $): Promise<void> {
     const fresh = await mergeInbox($, res)
     const waiting: InboxMessage[] = []
     for (const message of fresh) {
-      const isDirect = mayDeliverDirect(message.from) && (await deliverDirect($, message))
-      if (!isDirect) waiting.push(message)
+      const isHandled =
+        message.replyTo !== null
+          ? await showReply($, message)
+          : mayDeliverDirect(message.from) && (await deliverDirect($, message))
+      if (!isHandled) waiting.push(message)
     }
     if (waiting.length > 0) {
       const senders = [...new Set(waiting.map(m => `@${m.from}`))].join(', ')
@@ -304,8 +314,68 @@ function mayDeliverDirect(from: string): boolean {
 async function deliverDirect($: $, message: InboxMessage): Promise<boolean> {
   const acked = await acknowledge($, message.id, 'accepted')
   if (!acked) return false
+  // Remember it, so the turn it starts can send its answer back (turn.start).
+  const at = Date.now()
+  await update($, answering, list =>
+    [...list.filter(a => a.at > at - 60 * 60_000), { text: message.text, from: message.from, id: message.id, turnId: null, at }].slice(-20),
+  )
   void $.prompt.submit({ text: message.text, asUser: true })
   $.ui.toast(`crosstalk: @${message.from}'s message went to Claude.`)
+  return true
+}
+
+/** Matches a starting main-loop turn to a message delivered straight to Claude. */
+async function claimTurn($: $, turnId: string, text: string): Promise<void> {
+  const list = await read($, answering)
+  if (!list.some(a => a.turnId === null && a.text.trim() === text.trim())) return
+  await update($, answering, current => {
+    const at = current.findIndex(a => a.turnId === null && a.text.trim() === text.trim())
+    return at < 0 ? current : current.map((a, i) => (i === at ? { ...a, turnId } : a))
+  })
+}
+
+/** Takes the message whose turn just ended, if one is waiting for its answer. */
+async function takeAnswering($: $, turnId: string): Promise<Answering | undefined> {
+  const found = (await read($, answering)).find(a => a.turnId === turnId)
+  if (found) await update($, answering, list => list.filter(a => a.turnId !== turnId))
+  return found
+}
+
+/** Sends a finished turn's answer back to whoever's message started it, as a reply. */
+async function sendAnswer($: $, to: { from: string; id: number }, reason: string, answer: string): Promise<void> {
+  const raw =
+    reason === 'answer' && answer.trim()
+      ? answer
+      : `(@${session.me?.handle ?? 'their'} Claude stopped without an answer: ${reason})`
+  const { text, redacted } = prepare(raw)
+  const body = text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 40)}\n… (cut at ${MAX_TEXT} characters)` : text
+  try {
+    await deliver($, to.from, body, to.id)
+    const note = redacted.length ? ` (redacted: ${redacted.join(', ')})` : ''
+    $.ui.toast(`crosstalk: answer sent back to @${to.from}${note}.`)
+  } catch (error) {
+    $.ui.toast(`crosstalk: could not send the answer to @${to.from}: ${describeError(error)}`)
+  }
+}
+
+/**
+ * Shows a reply (a message with `replyTo`): to the person as a notice in the
+ * transcript, never as a prompt, so two Claudes cannot answer each other in
+ * a loop. A trusted sender's reply is also put before Claude as context.
+ */
+async function showReply($: $, message: InboxMessage): Promise<boolean> {
+  const acked = await acknowledge($, message.id, 'accepted')
+  if (!acked) return false
+  const header = `reply from ${message.fromName} (@${message.from}) to your message #${message.replyTo}`
+  // Transcript lines the person sees and the model does not. A log entry is
+  // one line drawn up to 2000 characters, so the reply goes line by line.
+  $.ui.log(header)
+  for (const line of replyLines(message.text)) $.ui.log(`  ${line}`)
+  if (isTrustedSender(message.from, session.config.autoDeliverFrom)) {
+    await tellClaude($, `crosstalk: ${header}:\n\n${message.text}`)
+  }
+  $.ui.toast(`crosstalk: reply from @${message.from}.`)
+  void $.ui.notify(`Reply from @${message.from}`, { title: 'crosstalk' }).catch(() => {})
   return true
 }
 
@@ -537,7 +607,11 @@ async function registerSurface($: $): Promise<void> {
       properties: {
         to: { type: 'string', description: 'The colleague\'s handle, e.g. "bob" (the who tool lists them).' },
         text: { type: 'string', description: `The message, at most ${MAX_TEXT} characters.` },
-        replyTo: { type: 'number', description: 'The id of the crosstalk message this answers, if any.' },
+        replyTo: {
+          type: 'number',
+          description:
+            'The id of the crosstalk message this answers. A message with replyTo is shown to them as a reply, never run as a prompt.',
+        },
       },
       required: ['to', 'text'],
       additionalProperties: false,
@@ -679,6 +753,20 @@ export const register: Register = (on, options) => {
     session.timer?.cancel()
     session.timer = undefined
     return next(e)
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await claimTurn($, e.turnId, e.text)
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined) {
+      const to = await takeAnswering($, e.turnId)
+      if (to) void sendAnswer($, to, e.reason, e.answer)
+    }
+    return result
   })
 
   on('command.run', { command: 'dm' }, ($, e) => runDm($, e.args))

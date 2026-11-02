@@ -26,6 +26,16 @@ export type Outgoing = {
   error: string | null
 }
 
+/** A message delivered straight to Claude, waiting for its turn's answer to go back. */
+export type Answering = {
+  text: string
+  from: string
+  id: number
+  /** The turn it started, once turn.start matched it. */
+  turnId: string | null
+  at: number
+}
+
 export type ConnectionStatus = 'unconfigured' | 'connecting' | 'online' | 'error'
 
 export type Connection = {
@@ -41,6 +51,7 @@ declare module 'claude-code' {
       inbox: Shaped<Incoming[]>
       outbox: Shaped<Outgoing[]>
       connection: Shaped<Connection>
+      answering: Shaped<Answering[]>
     }
   }
 }

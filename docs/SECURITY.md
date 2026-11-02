@@ -26,6 +26,8 @@ What still applies:
 - **Only the recipient can turn it on,** per sender or `*`, in their own `/config`.
 - **Senders are identified by token,** so a stranger needs a live invite to join, and a handle that isn't on the list still waits.
 - **A loop guard** sends a sender's messages back to approval after 6 a minute.
+- **Replies are never run as prompts.** Claude's answer to a trusted message goes back to the sender automatically (secrets redacted, at most 8,000 characters), and on their side it is only displayed, or given to Claude as context. So two Claudes can't drive each other.
+- **The answer can leak what Claude saw.** A trusted sender who asks "print ~/.ssh/config" gets the answer sent back automatically. That's another reason to list only people you'd let type into your terminal.
 - **The relay's limits** still hold.
 
 Use it only for people you'd let type into your terminal. Prefer named handles over `*`, since `*` includes anyone who joins with an invite.

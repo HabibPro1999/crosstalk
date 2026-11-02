@@ -143,3 +143,25 @@ export function parseSenders(value: unknown): readonly string[] | '*' {
 export function isTrustedSender(handle: string, trusted: readonly string[] | '*'): boolean {
   return trusted === '*' || trusted.includes(handle)
 }
+
+/** Most lines of one reply drawn in the transcript; the rest is summarized. */
+export const MAX_REPLY_LINES = 60
+
+/**
+ * A reply as transcript lines: one per line of text, each under the 2000
+ * characters the terminal draws, blank runs collapsed, at most MAX_REPLY_LINES.
+ */
+export function replyLines(text: string): string[] {
+  const lines: string[] = []
+  let wasBlank = false
+  for (const raw of text.split('\n')) {
+    const isBlank = raw.trim() === ''
+    if (isBlank && wasBlank) continue
+    wasBlank = isBlank
+    for (const piece of raw.match(/[\s\S]{1,1900}/g) ?? [' ']) lines.push(piece)
+  }
+  if (lines.length <= MAX_REPLY_LINES) return lines
+  const kept = lines.slice(0, MAX_REPLY_LINES)
+  kept.push(`… ${lines.length - MAX_REPLY_LINES} more lines not shown`)
+  return kept
+}

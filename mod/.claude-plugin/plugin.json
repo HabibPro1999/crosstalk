@@ -1,6 +1,6 @@
 {
   "name": "crosstalk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Message colleagues' Claude Code sessions through your organization's crosstalk relay. You approve every message in both directions.",
   "author": {
     "name": "HabibPro1999"
