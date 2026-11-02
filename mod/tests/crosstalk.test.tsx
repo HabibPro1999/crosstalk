@@ -372,29 +372,8 @@ describe('joining', () => {
     return written
   }
 
-  test('join with an invite saves into settings and connects', { options: { token: '' } }, async ($, on) => {
-    const clock = mock.clock(on)
-    mock.store(on)
-    const relay = fakeRelay()
-    engine(on, relay)
-    const written = settings(on, true)
-    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
-
-    const ran = await $.command.run({ command: 'crosstalk', args: `join ${INVITE} @Dana Dana D`, ...TYPED })
-    expect(ran.text).toContain('Joined crosstalk as @dana')
-    expect(ran.text).toContain('secure storage')
-    expect(ran.text).not.toContain(TOKEN)
-    expect(relay.state.joins).toEqual([{ invite: INVITE_CODE, handle: 'dana', displayName: 'Dana D' }])
-    expect(written).toEqual({ 'crosstalk.relayUrl': 'https://relay.example.com', 'crosstalk.token': TOKEN })
-
-    await clock.settle()
-    const polled = relay.state.requests.find(r => r.url.startsWith('https://relay.example.com/v1/inbox'))
-    expect(polled?.auth).toBe(`Bearer ${TOKEN}`)
-  })
-
-  test('when settings refuse, join keeps the token in the mod store', { options: { token: '' } }, async ($, on) => {
-    mock.clock(on)
-    const stored: Record<string, unknown> = {}
+  function memoryStore(on: On, entries: Record<string, unknown> = {}) {
+    const stored: Record<string, unknown> = { ...entries }
     on('store.get', (_, e) => ({ value: stored[e.key] }))
     on('store.set', (_, e) => {
       stored[e.key] = e.value
@@ -404,25 +383,60 @@ describe('joining', () => {
       delete stored[e.key]
       return { value: undefined }
     })
+    return stored
+  }
+
+  test('join keeps the token in the mod store, writes no setting, and connects', { options: { token: '' } }, async ($, on) => {
+    const clock = mock.clock(on)
+    const stored = memoryStore(on)
     const relay = fakeRelay()
     engine(on, relay)
-    settings(on, false)
-    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: false })
+    const written = settings(on, true)
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
 
-    const ran = await $.command.run({ command: 'crosstalk', args: `join ${INVITE} dana`, ...TYPED })
-    expect(ran.text).toContain("mod's own storage")
+    const ran = await $.command.run({ command: 'crosstalk', args: `join ${INVITE} @Dana Dana D`, ...TYPED })
+    expect(ran.text).toContain('Joined crosstalk as @dana')
+    expect(ran.text).not.toContain(TOKEN)
+    expect(relay.state.joins).toEqual([{ invite: INVITE_CODE, handle: 'dana', displayName: 'Dana D' }])
+    // A setting change reloads the module mid-command (the 0.2.0 bug), so join writes none.
+    expect(written).toEqual({})
+    expect(stored.credentials).toEqual({ relayUrl: 'https://relay.example.com', token: TOKEN, handle: 'dana' })
+
+    await clock.settle()
+    const polled = relay.state.requests.find(r => r.url.startsWith('https://relay.example.com/v1/inbox'))
+    expect(polled?.auth).toBe(`Bearer ${TOKEN}`)
     const who = await $.tool.call({ tool: 'mcp__crosstalk__who' })
     expect(String(who.result)).toContain('@bob')
-    expect(stored.credentials).toEqual({
-      relayUrl: 'https://relay.example.com',
-      token: TOKEN,
-      handle: 'dana',
-    })
+  })
+
+  test('a token typed into /config wins over a stored one', {
+    options: { relayUrl: 'https://typed.example.com', token: TOKEN },
+  }, async ($, on) => {
+    const clock = mock.clock(on)
+    memoryStore(on, { credentials: { relayUrl: 'https://stored.example.com', token: 'ct_' + 'z'.repeat(43), handle: 'x' } })
+    const relay = fakeRelay()
+    engine(on, relay)
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    expect(relay.state.requests[0]?.url.startsWith('https://typed.example.com/')).toBe(true)
+  })
+
+  test('after a reload that skips session.start, a redraw reconnects', { options: OPTIONS }, async ($, on) => {
+    const clock = mock.clock(on)
+    memoryStore(on)
+    const relay = fakeRelay()
+    engine(on, relay)
+    // No session.start: what a settings change does to a running session.
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await clock.settle()
+    expect(relay.state.requests.some(r => r.url.includes('/v1/inbox'))).toBe(true)
+    expect((await ui.find({ type: 'Text', text: /online as @alice/ }))?.text).toBeDefined()
+    await ui.unmount()
   })
 
   test('a session starts from credentials an earlier join stored', { options: { token: '' } }, async ($, on) => {
     mock.clock(on)
-    mock.store(on, { credentials: { relayUrl: 'https://relay.example.com', token: TOKEN, handle: 'alice' } })
+    memoryStore(on, { credentials: { relayUrl: 'https://relay.example.com', token: TOKEN, handle: 'alice' } })
     engine(on, fakeRelay())
     await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: false })
     const who = await $.tool.call({ tool: 'mcp__crosstalk__who' })

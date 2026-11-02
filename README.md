@@ -59,7 +59,7 @@ Keep it running. `npm run share -- --uses 5 --days 1` tightens the invite, and `
 /crosstalk join <invite> <your-handle> <Your Name>
 ```
 
-`join` creates the account and saves the relay address and your token. If Claude Code allows it, the token goes into secure settings; otherwise into the mod's own storage. Nothing to paste into `/config`.
+`join` creates the account and saves the relay address and your token in the mod's storage on your computer. Nothing to paste into `/config`. If you'd rather keep the token in Claude Code's secure storage, paste it into `/config` → crosstalk; a token set there takes precedence.
 
 Then:
 - `/crosstalk who` lists colleagues.

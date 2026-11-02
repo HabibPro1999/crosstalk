@@ -75,6 +75,12 @@ const session = {
   me: null as Me | null,
   failures: 0,
   isPolling: false,
+  /** Where the credentials in force came from: `/config`, or what `/crosstalk join` stored. */
+  source: 'settings' as 'settings' | 'store',
+  /** Set once the settings in force have been read for this module load. */
+  isLoaded: false,
+  /** Set when the settings cannot work; no restart is tried until they change. */
+  isParked: false,
   timer: undefined as { cancel(): void } | undefined,
 }
 
@@ -173,12 +179,41 @@ function schedule($: $, ms: number): void {
   })
 }
 
+/**
+ * Starts the connection when nothing runs it: after a reload (a settings
+ * change reloads the module without a new session.start), the first redraw
+ * of the band or pane calls this. Cheap and idempotent.
+ */
+function ensureConnection($: $): void {
+  if (session.timer || session.isPolling || session.isParked) return
+  session.isInteractive = true
+  schedule($, 0)
+}
+
 async function poll($: $): Promise<void> {
   if (session.isPolling) return
   session.isPolling = true
+  if (!session.isLoaded) {
+    session.isLoaded = true
+    session.config = await loadConfig($)
+    session.isLoaded = true
+  }
+  if (session.config.problem) {
+    session.isPolling = false
+    session.isParked = true
+    session.timer = undefined
+    await setConnection($, { status: 'unconfigured', handle: null, detail: session.config.problem })
+    await refreshStatus($)
+    return
+  }
   let delay = 200
   try {
     const me = await whoAmI($)
+    // Online as soon as the relay accepts the token, not after the first
+    // long-poll returns (up to 20 s later).
+    if ((await read($, connection)).status !== 'online') {
+      await setConnection($, { status: 'online', handle: me.handle, detail: null })
+    }
     const res = await api<InboxResponse>(
       $,
       'GET',
@@ -294,12 +329,18 @@ async function discard($: $, localId: string): Promise<void> {
  * mod's own store win (settings refused them); else the `/config` values.
  */
 async function loadConfig($: $): Promise<Config> {
+  // A token typed into /config wins; else what /crosstalk join stored.
+  if (String(session.options.token ?? '').trim()) {
+    session.source = 'settings'
+    return readConfig(session.options)
+  }
   let saved: unknown
   try {
     saved = await $.store.get(CREDENTIALS_KEY)
   } catch {
     saved = undefined
   }
+  session.source = isSavedCredentials(saved) ? 'store' : 'settings'
   return isSavedCredentials(saved)
     ? readConfig({ ...session.options, relayUrl: saved.relayUrl, token: saved.token })
     : readConfig(session.options)
@@ -308,6 +349,9 @@ async function loadConfig($: $): Promise<Config> {
 /** Switches this session to new settings and reconnects. */
 async function applyConfig($: $, config: Config): Promise<void> {
   session.timer?.cancel()
+  session.timer = undefined
+  session.isLoaded = true
+  session.isParked = false
   session.config = config
   session.me = null
   session.cursor = 0
@@ -325,21 +369,15 @@ async function trySetting($: $, key: string, value: string): Promise<boolean> {
 }
 
 /**
- * Saves a relay URL and token: into settings (the token into secure storage)
- * when the engine allows it, else into the mod's own store.
+ * Keeps the credentials `/crosstalk join` received in the mod's own store.
+ *
+ * Not in settings: changing a setting reloads the module at once, which can
+ * cut the command off between two writes and lose the token (0.2.0 did).
+ * A person who wants the token in secure storage pastes it into /config,
+ * which then wins (`loadConfig`).
  */
-async function saveCredentials($: $, relayUrl: string, token: string, handle: string): Promise<'settings' | 'store'> {
-  const isSaved = (await trySetting($, 'crosstalk.relayUrl', relayUrl)) && (await trySetting($, 'crosstalk.token', token))
-  if (isSaved) {
-    try {
-      await $.store.delete(CREDENTIALS_KEY)
-    } catch {
-      // Nothing was stored.
-    }
-    return 'settings'
-  }
+async function storeCredentials($: $, relayUrl: string, token: string, handle: string): Promise<void> {
   await $.store.set(CREDENTIALS_KEY, { relayUrl, token, handle })
-  return 'store'
 }
 
 async function postJoin($: $, relayUrl: string, body: Record<string, unknown>): Promise<JoinResponse> {
@@ -385,15 +423,21 @@ async function runJoin($: $, args: string): Promise<{ text: string }> {
     return { text: `Could not join: ${describeError(error)}` }
   }
 
-  const where = await saveCredentials($, invite.relayUrl, joined.token, joined.handle)
+  try {
+    await storeCredentials($, invite.relayUrl, joined.token, joined.handle)
+  } catch (error) {
+    return {
+      text:
+        `Joined as @${joined.handle}, but could not save your token (${(error as Error).message}). ` +
+        'Ask your relay admin to run: admin.ts rotate ' + joined.handle + ', then paste the new token into /config.',
+    }
+  }
+  session.source = 'store'
+  session.options = { ...session.options, token: '' }
   await applyConfig($, readConfig({ ...session.options, relayUrl: invite.relayUrl, token: joined.token }))
-  const stored =
-    where === 'settings'
-      ? 'Your token is saved in Claude Code settings (secure storage).'
-      : "Your token is saved in the mod's own storage (Claude Code settings refused it)."
   return {
     text:
-      `Joined crosstalk as @${joined.handle} (${joined.displayName}). ${stored}\n` +
+      `Joined crosstalk as @${joined.handle} (${joined.displayName}). Your token is saved in the mod's storage on this computer.\n` +
       'Try /crosstalk who, then /dm <handle> <message>. Incoming messages appear in /crosstalk.',
   }
 }
@@ -411,7 +455,13 @@ async function runUrl($: $, args: string): Promise<{ text: string }> {
   session.config = next
   try {
     const me = await api<Me>($, 'GET', '/v1/me')
-    await saveCredentials($, relayUrl, token, me.handle)
+    if (session.source === 'store') {
+      await storeCredentials($, relayUrl, token, me.handle)
+    } else if (!(await trySetting($, 'crosstalk.relayUrl', relayUrl))) {
+      // Settings refused the address: keep it beside the token in the store.
+      await storeCredentials($, relayUrl, token, me.handle)
+      session.source = 'store'
+    }
     await applyConfig($, next)
     return { text: `crosstalk now uses ${relayUrl}, as @${me.handle}.` }
   } catch (error) {
@@ -474,6 +524,7 @@ async function startConnection($: $, isInteractive: boolean): Promise<void> {
   const { problem } = session.config
   session.timer?.cancel()
   if (problem) {
+    session.isParked = true
     await setConnection($, { status: 'unconfigured', handle: null, detail: problem })
   } else if (isInteractive) {
     // Only an interactive session has a person to show incoming messages to.
@@ -607,6 +658,7 @@ export const register: Register = (on, options) => {
   }))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    ensureConnection($)
     if (e.props.hasSurvey) return next(e)
     const waiting = await read($, inbox)
     const drafts = (await read($, outbox)).filter(d => !d.isBusy)
@@ -630,6 +682,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    ensureConnection($)
     const { Box, Text, Button } = $.ui.resolve(e)
     const conn = await read($, connection)
     const waiting = await read($, inbox)
