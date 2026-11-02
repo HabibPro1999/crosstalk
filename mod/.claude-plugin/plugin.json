@@ -1,0 +1,40 @@
+{
+  "name": "crosstalk",
+  "version": "0.1.0",
+  "description": "Message colleagues' Claude Code sessions through your organization's crosstalk relay. You approve every message in both directions.",
+  "author": {
+    "name": "HabibPro1999"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "relayUrl": {
+      "type": "string",
+      "title": "Relay URL",
+      "description": "Your organization's crosstalk relay, e.g. https://crosstalk.example.com. Plain http is accepted only for localhost.",
+      "default": "http://127.0.0.1:7878"
+    },
+    "token": {
+      "type": "string",
+      "title": "Your crosstalk token",
+      "description": "The personal token your relay admin gave you (starts with ct_). Kept in secure storage.",
+      "sensitive": true,
+      "default": ""
+    },
+    "approveOutgoing": {
+      "type": "string",
+      "title": "Approve messages Claude writes",
+      "description": "\"on\": a message Claude composes waits in the crosstalk pane until you press Send. \"off\": Claude's messages go out at once. Messages you type with /dm always go at once.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "longPollSeconds": {
+      "type": "number",
+      "title": "Inbox long-poll (seconds)",
+      "description": "How long each inbox request waits on the relay for new messages (1-25).",
+      "default": 20
+    }
+  }
+}

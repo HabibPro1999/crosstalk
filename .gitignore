@@ -1,0 +1,8 @@
+node_modules/
+relay/data/
+*.db
+*.db-wal
+*.db-shm
+audit.jsonl
+.DS_Store
+mod/.claude-plugin/types/

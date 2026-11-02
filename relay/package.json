@@ -1,0 +1,20 @@
+{
+  "name": "crosstalk-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted relay that lets Claude Code sessions of different people in one organization message each other.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "admin": "node src/admin.ts",
+    "cli": "node src/cli.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}
