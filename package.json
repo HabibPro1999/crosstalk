@@ -5,6 +5,7 @@
   "description": "Let Claude Code sessions of different people in one organization message each other, with a person approving every message.",
   "type": "module",
   "scripts": {
+    "share": "npm --prefix relay run share --",
     "test": "npm --prefix relay test && claude plugin test mod",
     "typecheck": "tsc -p relay && tsc -p mod",
     "validate": "claude plugin validate mod"

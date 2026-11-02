@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/main.ts",
+    "share": "node src/share.ts",
     "admin": "node src/admin.ts",
     "cli": "node src/cli.ts",
     "test": "node --test test/*.test.ts",

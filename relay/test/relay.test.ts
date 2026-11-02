@@ -234,3 +234,79 @@ describe('retention', () => {
     assert.equal(removed, 2)
   })
 })
+
+describe('join with an invite', () => {
+  async function join(body: Record<string, unknown>, client = '203.0.113.7') {
+    const res = await fetch(`${base}/v1/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'cf-connecting-ip': client },
+      body: JSON.stringify(body),
+    })
+    return { status: res.status, body: (await res.json()) as any }
+  }
+
+  test('a valid invite adds the person and returns a working token', async () => {
+    const { code } = store.createInvite({ maxUses: 2, ttlMs: 60_000 }, clock)
+    const joined = await join({ invite: code, handle: '@Dana', displayName: 'Dana D' })
+    assert.equal(joined.status, 201)
+    assert.equal(joined.body.handle, 'dana')
+    assert.match(joined.body.token, /^ct_/)
+    const me = await clientFor(joined.body.token).call('GET', '/v1/me')
+    assert.deepEqual(me.body, { handle: 'dana', displayName: 'Dana D' })
+    assert.equal((await alice.send('dana', 'welcome')).status, 201)
+  })
+
+  test('refuses a taken handle without spending a use', async () => {
+    const { code } = store.createInvite({ maxUses: 1, ttlMs: 60_000 }, clock)
+    const taken = await join({ invite: code, handle: 'bob' })
+    assert.equal(taken.status, 409)
+    assert.equal(taken.body.error, 'handle_taken')
+    assert.equal((await join({ invite: code, handle: 'erin' })).status, 201)
+  })
+
+  test('an invite stops working when used up, expired or revoked', async () => {
+    const once = store.createInvite({ maxUses: 1, ttlMs: 60_000 }, clock)
+    assert.equal((await join({ invite: once.code, handle: 'frank' })).status, 201)
+    assert.equal((await join({ invite: once.code, handle: 'gina' })).body.error, 'invite_invalid')
+
+    const short = store.createInvite({ maxUses: 5, ttlMs: 1000 }, clock)
+    clock += 2000
+    assert.equal((await join({ invite: short.code, handle: 'hank' })).body.error, 'invite_invalid')
+
+    const revoked = store.createInvite({ maxUses: 5, ttlMs: 60_000 }, clock)
+    store.revokeInvite(revoked.id, clock)
+    assert.equal((await join({ invite: revoked.code, handle: 'ivy' })).body.error, 'invite_invalid')
+  })
+
+  test('refuses a made-up invite and a bad handle', async () => {
+    assert.equal((await join({ invite: 'inv_' + 'x'.repeat(43), handle: 'jo-e' })).body.error, 'invite_invalid')
+    assert.equal((await join({ invite: 'nope', handle: 'joe' })).status, 400)
+    const { code } = store.createInvite({ maxUses: 5, ttlMs: 60_000 }, clock)
+    assert.equal((await join({ invite: code, handle: 'x' })).status, 400)
+    assert.equal((await join({ invite: code, handle: '../root' })).status, 400)
+  })
+
+  test('rate-limits join attempts per client address', async () => {
+    for (let i = 0; i < 10; i++) {
+      await join({ invite: 'inv_' + 'y'.repeat(43), handle: `guess${i}` }, '198.51.100.9')
+    }
+    const limited = await join({ invite: 'inv_' + 'y'.repeat(43), handle: 'guess10' }, '198.51.100.9')
+    assert.equal(limited.status, 429)
+    // Another address is unaffected.
+    const { code } = store.createInvite({ maxUses: 1, ttlMs: 60_000 }, clock)
+    assert.equal((await join({ invite: code, handle: 'kim' }, '198.51.100.10')).status, 201)
+  })
+})
+
+describe('invites in the protocol', async () => {
+  const { parseInvite, formatInvite } = await import('../../mod/hooks/protocol.ts')
+  test('formats and parses relay URL plus code as one string', () => {
+    const code = 'inv_' + 'A'.repeat(43)
+    const text = formatInvite('https://relay.example.com/', code)
+    assert.equal(text, `https://relay.example.com#${code}`)
+    assert.deepEqual(parseInvite(`  ${text}  `), { relayUrl: 'https://relay.example.com', code })
+    assert.equal(parseInvite('https://relay.example.com#inv_short'), null)
+    assert.equal(parseInvite(code), null)
+    assert.equal(parseInvite(`ftp://x#${code}`), null)
+  })
+})

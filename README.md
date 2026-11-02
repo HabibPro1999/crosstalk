@@ -36,38 +36,50 @@ Claude Code's built-in `SendMessage` only reaches sessions on your own account. 
 
 **Presence.** `/crosstalk who`, or Claude's `who` tool, lists colleagues and whether their Claude Code is online right now.
 
-## Quick start (local, two terminals)
+## Quick start
 
-Requires Node 24+ (22.18+ works) and Claude Code 2.1.287+ with mods enabled.
-
-```bash
-cd relay
-node src/admin.ts add alice "Alice A"     # prints alice's token once
-node src/admin.ts add bob "Bob B"         # prints bob's token once
-node src/main.ts                           # relay on http://127.0.0.1:7878
-```
-
-Load the mod in a Claude Code session:
+**On the machine that runs the relay** (Node 24+, and `cloudflared` for a public address: `brew install cloudflared`):
 
 ```bash
-claude --plugin-dir /path/to/crosstalk/mod
+npm run share
 ```
 
-Then run `/config`, find **crosstalk**, and set:
-- **Relay URL:** `http://127.0.0.1:7878` (this is the default)
-- **Your crosstalk token:** the `ct_…` token. It's kept in secure storage.
-- **Approve messages Claude writes:** `on` (recommended)
+This command:
+1. Starts the relay.
+2. Opens a temporary public `https://….trycloudflare.com` address.
+3. Waits until that address answers.
+4. Prints an invite such as `https://….trycloudflare.com#inv_…`, good for 20 joins over 7 days.
 
-Try it:
+Keep it running. `npm run share -- --uses 5 --days 1` tightens the invite, and `--local` skips the tunnel.
+
+**Each person, in Claude Code** (2.1.287+, mods enabled):
+
+```
+/plugin install crosstalk --marketplace HabibPro1999/crosstalk
+/crosstalk join <invite> <your-handle> <Your Name>
+```
+
+`join` creates the account and saves the relay address and your token. If Claude Code allows it, the token goes into secure settings; otherwise into the mod's own storage. Nothing to paste into `/config`.
+
+Then:
 - `/crosstalk who` lists colleagues.
 - `/dm bob are you free to review #42?` sends a message.
 - `/crosstalk` opens the inbox.
-- Ask Claude: "message bob that the migration is done". Claude drafts it and you approve it.
+- `/crosstalk help` lists the rest.
+- Or ask Claude: "message bob that the migration is done". Claude drafts it and you approve it.
+
+**When the relay restarts,** a quick tunnel gets a new address. `share` prints the one line people who already joined need:
+
+```
+/crosstalk url https://<new-address>.trycloudflare.com
+```
+
+A named Cloudflare tunnel, or a real host, keeps one fixed address.
 
 Without Claude Code, `relay/src/cli.ts` is a terminal client:
 
 ```bash
-export CROSSTALK_URL=http://127.0.0.1:7878 CROSSTALK_TOKEN=ct_...
+export CROSSTALK_URL=https://… CROSSTALK_TOKEN=ct_...
 node relay/src/cli.ts who | send bob hi | inbox --wait | ack 3 dismissed
 ```
 
@@ -75,7 +87,7 @@ node relay/src/cli.ts who | send bob hi | inbox --wait | ack 3 dismissed
 
 1. Run `node relay/src/main.ts` on a small VM or container. It binds `127.0.0.1:7878` by default.
 2. Put it behind a TLS reverse proxy (Caddy, nginx, or a cloud load balancer). **The mod refuses plain `http` for anything but localhost.** Set `CROSSTALK_HOST=0.0.0.0` only when the proxy runs on another host.
-3. Issue one token per person with `node src/admin.ts add <handle> "<Name>"`. Send each token privately. Use `rotate` and `revoke` when people lose a token or leave.
+3. Let people join with an invite: `node src/admin.ts invite --uses 20 --days 7 --url https://crosstalk.example.com`. List invites with `invites` and cancel one with `revoke-invite <id>`. Alternatively, issue a token directly with `add <handle> "<Name>"`. Use `rotate` and `revoke` when people lose a token or leave.
 4. Back up `data/crosstalk.db`. `data/audit.jsonl` records metadata only (who, to whom, when, size, sha256). Set `CROSSTALK_AUDIT_CONTENT=1` only if your policy requires bodies.
 
 | Variable | Default | Meaning |
@@ -116,10 +128,10 @@ Then set the relay URL and your token in `/config` under **crosstalk**.
 
 ```bash
 npm --prefix relay install       # dev-only: @types/node for type-checking
-npm --prefix relay test          # 17 relay tests (node:test)
+npm --prefix relay test          # 23 relay tests (node:test)
 npm --prefix relay run typecheck
 claude plugin validate mod       # what the engine will load and refuse
-claude plugin test mod           # 12 mod tests in Claude Code's own test kit
+claude plugin test mod           # 17 mod tests in Claude Code's own test kit
 tsc -p mod                       # needs mod/.claude-plugin/types (the engine writes it when it loads the mod)
 ```
 
@@ -128,6 +140,6 @@ tsc -p mod                       # needs mod/.claude-plugin/types (the engine wr
 ## Known limits (v0.1)
 
 - **Delivery is per person, not per session.** Each of your open sessions shows the message, and the first one where you act on it wins. The others drop it.
-- **No SSO yet.** Identity is a per-person bearer token. Putting the relay behind your identity-aware proxy is the natural next step.
+- **No SSO yet.** Identity is a per-person bearer token, issued through invites. Anyone holding a live invite can join under an unused handle, so send invites privately and keep them short-lived. Putting the relay behind your identity-aware proxy is the natural next step.
 - **Text only.** No attachments and no threads beyond `replyTo` ids.
 - **Built on the mods API, which is early access** and changes between Claude Code releases.

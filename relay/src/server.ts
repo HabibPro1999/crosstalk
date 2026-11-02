@@ -10,11 +10,13 @@ import {
   MAX_TEXT,
   MAX_WAIT_SECONDS,
   PROTOCOL_VERSION,
+  INVITE_CODE,
   cleanText,
   isAckAction,
   type AckResponse,
   type ErrorCode,
   type InboxResponse,
+  type JoinResponse,
   type Me,
   type Person,
   type SendResponse,
@@ -40,6 +42,8 @@ export type Limits = {
   staleMs: number
   /** Largest request body accepted, in bytes. */
   maxBodyBytes: number
+  /** Join attempts one client (by address) may make per ten minutes. */
+  joinAttemptsPer10Min: number
 }
 
 export const DEFAULT_LIMITS: Limits = {
@@ -52,6 +56,7 @@ export const DEFAULT_LIMITS: Limits = {
   ackedRetentionMs: 24 * 60 * 60_000,
   staleMs: 7 * 24 * 60 * 60_000,
   maxBodyBytes: 32 * 1024,
+  joinAttemptsPer10Min: 10,
 }
 
 export type RelayOptions = {
@@ -88,6 +93,7 @@ export function createRelay(options: RelayOptions): Relay {
   const log = options.log ?? (() => {})
 
   const sentAt = new Map<string, number[]>()
+  const joinAttempts = new Map<string, number[]>()
   const waiters = new Map<string, Set<() => void>>()
 
   function audit(entry: Record<string, unknown>): void {
@@ -249,6 +255,54 @@ export function createRelay(options: RelayOptions): Relay {
     return { acked }
   }
 
+  /**
+   * The client's address: the proxy's header when one is in front (Cloudflare,
+   * or a reverse proxy's X-Forwarded-For), else the socket's. The relay binds
+   * loopback by default, so only the proxy can set these headers.
+   */
+  function clientAddress(req: IncomingMessage): string {
+    const cf = req.headers['cf-connecting-ip']
+    if (typeof cf === 'string' && cf) return cf
+    const forwarded = req.headers['x-forwarded-for']
+    if (typeof forwarded === 'string' && forwarded) return forwarded.split(',')[0]!.trim()
+    return req.socket.remoteAddress ?? 'unknown'
+  }
+
+  function join(req: IncomingMessage, body: Record<string, unknown>): JoinResponse {
+    const client = clientAddress(req)
+    const t = now()
+    const recent = (joinAttempts.get(client) ?? []).filter(at => at > t - 10 * 60_000)
+    if (recent.length >= limits.joinAttemptsPer10Min) {
+      joinAttempts.set(client, recent)
+      throw new HttpError(429, 'rate_limited', 'Too many join attempts. Try again in a few minutes.')
+    }
+    recent.push(t)
+    joinAttempts.set(client, recent)
+
+    const invite = typeof body.invite === 'string' ? body.invite.trim() : ''
+    if (!INVITE_CODE.test(invite)) throw new HttpError(400, 'bad_request', '"invite" must be an invite code.')
+    const handle = typeof body.handle === 'string' ? body.handle.trim().replace(/^@/, '').toLowerCase() : ''
+    if (!isValidHandle(handle)) {
+      throw new HttpError(
+        400,
+        'bad_request',
+        'A handle is 3-40 characters: lowercase letters, digits, ".", "_" or "-", starting and ending with a letter or digit.',
+      )
+    }
+    const displayName = cleanText(typeof body.displayName === 'string' ? body.displayName : '').slice(0, 80) || handle
+
+    try {
+      const token = store.redeemInvite(invite, handle, displayName, t)
+      audit({ event: 'join', handle, client })
+      return { handle, displayName, token }
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      if (code === 'invite_invalid') throw new HttpError(403, 'invite_invalid', (error as Error).message)
+      if (code === 'handle_taken') throw new HttpError(409, 'handle_taken', (error as Error).message)
+      throw error
+    }
+  }
+
   function people(): Person[] {
     const t = now()
     return store.people().map(row => {
@@ -262,6 +316,7 @@ export function createRelay(options: RelayOptions): Relay {
     const key = `${req.method} ${url.pathname}`
 
     if (key === 'GET /healthz') return send(res, 200, { ok: true, protocol: PROTOCOL_VERSION })
+    if (key === 'POST /v1/join') return send(res, 201, join(req, await readJson(req)))
 
     const user = authenticate(req)
     switch (key) {

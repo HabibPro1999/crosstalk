@@ -13,6 +13,26 @@ export type Config = {
   problem: string | null
 }
 
+/** Credentials `/crosstalk join` saved in the mod's own store, when settings refused them. */
+export type SavedCredentials = { relayUrl: string; token: string; handle: string }
+
+export function isSavedCredentials(value: unknown): value is SavedCredentials {
+  const v = value as Partial<SavedCredentials> | null
+  return !!v && typeof v.relayUrl === 'string' && typeof v.token === 'string' && typeof v.handle === 'string'
+}
+
+/** Why a relay URL is unusable, or null: https anywhere, http only for localhost. */
+export function relayUrlProblem(relayUrl: string): string | null {
+  try {
+    const url = new URL(relayUrl)
+    const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    if (url.protocol === 'https:' || (url.protocol === 'http:' && isLocal)) return null
+    return 'The relay URL must use https (plain http is only allowed for localhost).'
+  } catch {
+    return `The relay URL "${relayUrl}" is not a valid URL.`
+  }
+}
+
 export function readConfig(options: Readonly<Record<string, unknown>>): Config {
   const relayUrl = String(options.relayUrl ?? '').trim().replace(/\/+$/, '')
   const token = String(options.token ?? '').trim()
@@ -20,19 +40,11 @@ export function readConfig(options: Readonly<Record<string, unknown>>): Config {
   let problem: string | null = null
 
   if (!token) {
-    problem = 'No token set. Run /config, find crosstalk, and paste the token your relay admin gave you.'
+    problem = 'Not joined yet. Run /crosstalk join <invite> <your-handle> <Your Name> with the invite you were sent.'
   } else if (!token.startsWith('ct_')) {
     problem = 'The crosstalk token should start with ct_.'
   } else {
-    try {
-      const url = new URL(relayUrl)
-      const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-      if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLocal)) {
-        problem = 'The relay URL must use https (plain http is only allowed for localhost).'
-      }
-    } catch {
-      problem = `The relay URL "${relayUrl}" is not a valid URL.`
-    }
+    problem = relayUrlProblem(relayUrl)
   }
 
   return {
@@ -103,4 +115,14 @@ export function parseDm(args: string): { to: string; text: string } | null {
   const match = /^\s*(\S+)\s+([\s\S]+)$/.exec(args)
   const to = normalizeHandle(match?.[1])
   return match && to ? { to, text: match[2] ?? '' } : null
+}
+
+export type JoinArgs = { invite: string; handle: string; displayName: string }
+
+/** Splits `/crosstalk join <invite> <handle> [Your Name]`. */
+export function parseJoin(args: string): JoinArgs | null {
+  const [invite, rawHandle, ...name] = args.trim().split(/\s+/)
+  const handle = normalizeHandle(rawHandle)
+  if (!invite || !handle) return null
+  return { invite, handle, displayName: name.join(' ').trim() || handle }
 }

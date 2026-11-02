@@ -17,9 +17,11 @@ import {
   MAX_TEXT,
   cleanText,
   envelope,
+  parseInvite,
   redactSecrets,
   type InboxMessage,
   type InboxResponse,
+  type JoinResponse,
   type Me,
   type Person,
   type SendResponse,
@@ -30,11 +32,14 @@ import {
   basename,
   describeError,
   formatPeople,
+  isSavedCredentials,
   newLocalId,
   normalizeHandle,
   parseDm,
+  parseJoin,
   preview,
   readConfig,
+  relayUrlProblem,
   type Config,
 } from './util'
 
@@ -44,6 +49,8 @@ const PANE = 'crosstalk'
 const TITLE = 'crosstalk'
 const SEND_TOOL = 'mcp__crosstalk__send'
 const WHO_TOOL = 'mcp__crosstalk__who'
+/** `$.store` key of credentials `/crosstalk join` saved when settings refused them. */
+const CREDENTIALS_KEY = 'credentials'
 
 const inbox = atom({ plugin: 'crosstalk', key: 'inbox' } as const, [] as Incoming[], {
   shape: 'inbox-1',
@@ -60,6 +67,8 @@ const connection = atom(
 // Session-local state. The module is evaluated afresh on every reload, and
 // session.start runs again then, so these start over with it.
 const session = {
+  options: {} as Readonly<Record<string, unknown>>,
+  isInteractive: false,
   config: readConfig({}) as Config,
   cursor: 0,
   label: 'claude-code',
@@ -278,6 +287,148 @@ async function discard($: $, localId: string): Promise<void> {
   )
 }
 
+// ---------------------------------------------------------------- joining
+
+/**
+ * The settings in force: credentials `/crosstalk join` had to keep in the
+ * mod's own store win (settings refused them); else the `/config` values.
+ */
+async function loadConfig($: $): Promise<Config> {
+  let saved: unknown
+  try {
+    saved = await $.store.get(CREDENTIALS_KEY)
+  } catch {
+    saved = undefined
+  }
+  return isSavedCredentials(saved)
+    ? readConfig({ ...session.options, relayUrl: saved.relayUrl, token: saved.token })
+    : readConfig(session.options)
+}
+
+/** Switches this session to new settings and reconnects. */
+async function applyConfig($: $, config: Config): Promise<void> {
+  session.timer?.cancel()
+  session.config = config
+  session.me = null
+  session.cursor = 0
+  session.failures = 0
+  await startConnection($, session.isInteractive)
+}
+
+async function trySetting($: $, key: string, value: string): Promise<boolean> {
+  try {
+    const result = await $.config.set({ key, value })
+    return result.deny === undefined
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Saves a relay URL and token: into settings (the token into secure storage)
+ * when the engine allows it, else into the mod's own store.
+ */
+async function saveCredentials($: $, relayUrl: string, token: string, handle: string): Promise<'settings' | 'store'> {
+  const isSaved = (await trySetting($, 'crosstalk.relayUrl', relayUrl)) && (await trySetting($, 'crosstalk.token', token))
+  if (isSaved) {
+    try {
+      await $.store.delete(CREDENTIALS_KEY)
+    } catch {
+      // Nothing was stored.
+    }
+    return 'settings'
+  }
+  await $.store.set(CREDENTIALS_KEY, { relayUrl, token, handle })
+  return 'store'
+}
+
+async function postJoin($: $, relayUrl: string, body: Record<string, unknown>): Promise<JoinResponse> {
+  const res = await $.http.fetch(`${relayUrl}/v1/join`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body),
+  })
+  let data: unknown
+  try {
+    data = JSON.parse(res.text)
+  } catch {
+    throw new RelayError(res.status, 'bad_response', `the relay answered ${res.status} with something that is not JSON`)
+  }
+  if (!res.ok) {
+    const err = data as { error?: string; message?: string }
+    throw new RelayError(res.status, err.error ?? 'error', err.message ?? `the relay answered ${res.status}`)
+  }
+  return data as JoinResponse
+}
+
+async function runJoin($: $, args: string): Promise<{ text: string }> {
+  const parsed = parseJoin(args)
+  const invite = parsed ? parseInvite(parsed.invite) : null
+  if (!parsed || !invite) {
+    return {
+      text:
+        'Usage: /crosstalk join <invite> <your-handle> [Your Name]\n' +
+        'The invite looks like https://relay.example.com#inv_… ; a handle is 3-40 lowercase letters, digits, ".", "_" or "-".',
+    }
+  }
+  const urlProblem = relayUrlProblem(invite.relayUrl)
+  if (urlProblem) return { text: urlProblem }
+
+  let joined: JoinResponse
+  try {
+    joined = await postJoin($, invite.relayUrl, {
+      invite: invite.code,
+      handle: parsed.handle,
+      displayName: parsed.displayName,
+    })
+  } catch (error) {
+    return { text: `Could not join: ${describeError(error)}` }
+  }
+
+  const where = await saveCredentials($, invite.relayUrl, joined.token, joined.handle)
+  await applyConfig($, readConfig({ ...session.options, relayUrl: invite.relayUrl, token: joined.token }))
+  const stored =
+    where === 'settings'
+      ? 'Your token is saved in Claude Code settings (secure storage).'
+      : "Your token is saved in the mod's own storage (Claude Code settings refused it)."
+  return {
+    text:
+      `Joined crosstalk as @${joined.handle} (${joined.displayName}). ${stored}\n` +
+      'Try /crosstalk who, then /dm <handle> <message>. Incoming messages appear in /crosstalk.',
+  }
+}
+
+async function runUrl($: $, args: string): Promise<{ text: string }> {
+  const relayUrl = args.trim().replace(/\/+$/, '')
+  if (!relayUrl) return { text: 'Usage: /crosstalk url <relay url>, e.g. /crosstalk url https://relay.example.com' }
+  const urlProblem = relayUrlProblem(relayUrl)
+  if (urlProblem) return { text: urlProblem }
+  const { token } = session.config
+  if (!token) return { text: 'Not joined yet: use /crosstalk join with an invite first.' }
+
+  const next = readConfig({ ...session.options, relayUrl, token })
+  const previous = session.config
+  session.config = next
+  try {
+    const me = await api<Me>($, 'GET', '/v1/me')
+    await saveCredentials($, relayUrl, token, me.handle)
+    await applyConfig($, next)
+    return { text: `crosstalk now uses ${relayUrl}, as @${me.handle}.` }
+  } catch (error) {
+    session.config = previous
+    return { text: `Kept the old address: ${relayUrl} did not accept your token (${describeError(error)}).` }
+  }
+}
+
+const HELP = [
+  '/crosstalk                 open the inbox',
+  '/crosstalk who             list colleagues and who is online',
+  '/crosstalk status          show the connection',
+  '/crosstalk join <invite> <handle> [Your Name]   join a relay with an invite',
+  '/crosstalk url <relay url> switch to a relay\'s new address (after it restarts)',
+  '/dm <handle> <message>     send a message now',
+].join('\n')
+
 // ---------------------------------------------------------------- setup
 
 async function registerSurface($: $): Promise<void> {
@@ -288,8 +439,8 @@ async function registerSurface($: $): Promise<void> {
   })
   await $.command.register({
     name: 'crosstalk',
-    description: 'Open the crosstalk inbox; "who" lists colleagues, "status" shows the connection',
-    argumentHint: '[who|status]',
+    description: 'Open the crosstalk inbox; join a relay, list colleagues, show the connection',
+    argumentHint: '[join <invite> <handle> <Name> | url <relay url> | who | status | help]',
   })
   await $.tool.register({
     name: 'send',
@@ -321,6 +472,7 @@ async function registerSurface($: $): Promise<void> {
 
 async function startConnection($: $, isInteractive: boolean): Promise<void> {
   const { problem } = session.config
+  session.timer?.cancel()
   if (problem) {
     await setConnection($, { status: 'unconfigured', handle: null, detail: problem })
   } else if (isInteractive) {
@@ -350,7 +502,11 @@ async function runDm($: $, args: string): Promise<{ text: string }> {
 }
 
 async function runCrosstalk($: $, args: string): Promise<{ text: string }> {
-  const arg = args.trim().toLowerCase()
+  const [first = '', ...rest] = args.trim().split(/\s+/)
+  const arg = first.toLowerCase()
+  if (arg === 'join') return runJoin($, rest.join(' '))
+  if (arg === 'url') return runUrl($, rest.join(' '))
+  if (arg === 'help') return { text: HELP }
   if (arg === 'who') {
     if (session.config.problem) return { text: `crosstalk is not set up: ${session.config.problem}` }
     try {
@@ -422,10 +578,13 @@ async function runWhoTool($: $): Promise<{ result: string } | { deny: string }> 
 // ---------------------------------------------------------------- module
 
 export const register: Register = (on, options) => {
+  session.options = options
   session.config = readConfig(options)
 
   on('session.start', async ($, e, next) => {
     session.label = basename(e.cwd)
+    session.isInteractive = e.isInteractive
+    session.config = await loadConfig($)
     await registerSurface($)
     const started = await next(e)
     await startConnection($, e.isInteractive)

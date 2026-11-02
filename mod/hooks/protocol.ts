@@ -47,7 +47,12 @@ export type AckAction = 'accepted' | 'dismissed'
 export type AckRequest = { ids: number[]; action: AckAction }
 export type AckResponse = { acked: number }
 
+export type JoinRequest = { invite: string; handle: string; displayName?: string }
+export type JoinResponse = { handle: string; displayName: string; token: string }
+
 export type ErrorCode =
+  | 'invite_invalid'
+  | 'handle_taken'
   | 'unauthorized'
   | 'bad_request'
   | 'not_found'
@@ -132,6 +137,35 @@ export function envelope(message: InboxMessage, myHandle: string): string {
     body,
     CLOSE,
   ].join('\n')
+}
+
+/** The shape of an invite code: `inv_` and 43 base64url characters. */
+export const INVITE_CODE = /^inv_[A-Za-z0-9_-]{43}$/
+
+export type Invite = { relayUrl: string; code: string }
+
+/**
+ * Reads an invite as `share` prints it, `<relay url>#<code>`, the relay's
+ * address and the one-time code together, so a person pastes one string.
+ */
+export function parseInvite(text: string): Invite | null {
+  const trimmed = text.trim()
+  const hash = trimmed.lastIndexOf('#')
+  if (hash < 0) return null
+  const code = trimmed.slice(hash + 1)
+  const relayUrl = trimmed.slice(0, hash).replace(/\/+$/, '')
+  if (!INVITE_CODE.test(code)) return null
+  try {
+    const url = new URL(relayUrl)
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null
+  } catch {
+    return null
+  }
+  return { relayUrl, code }
+}
+
+export function formatInvite(relayUrl: string, code: string): string {
+  return `${relayUrl.replace(/\/+$/, '')}#${code}`
 }
 
 export function isAckAction(value: unknown): value is AckAction {

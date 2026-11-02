@@ -52,6 +52,15 @@ export function openStore(path = ':memory:') {
     );
     CREATE INDEX IF NOT EXISTS messages_open ON messages(recipient, acked_at, id);
     CREATE INDEX IF NOT EXISTS messages_dupe ON messages(sender, recipient, text_hash, created_at);
+    CREATE TABLE IF NOT EXISTS invites (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      code_hash   TEXT NOT NULL UNIQUE,
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER NOT NULL,
+      max_uses    INTEGER NOT NULL,
+      uses        INTEGER NOT NULL DEFAULT 0,
+      revoked_at  INTEGER
+    );
     CREATE TABLE IF NOT EXISTS presence (
       handle     TEXT PRIMARY KEY REFERENCES users(handle),
       last_seen  INTEGER NOT NULL,
@@ -104,6 +113,17 @@ export function openStore(path = ':memory:') {
       INSERT INTO presence (handle, last_seen, label) VALUES (?, ?, ?)
       ON CONFLICT(handle) DO UPDATE SET last_seen = excluded.last_seen,
         label = COALESCE(excluded.label, presence.label)`),
+    addInvite: db.prepare(
+      'INSERT INTO invites (code_hash, created_at, expires_at, max_uses) VALUES (?, ?, ?, ?)',
+    ),
+    inviteByHash: db.prepare(
+      'SELECT id, expires_at AS expiresAt, max_uses AS maxUses, uses, revoked_at AS revokedAt FROM invites WHERE code_hash = ?',
+    ),
+    useInvite: db.prepare('UPDATE invites SET uses = uses + 1 WHERE id = ?'),
+    invites: db.prepare(
+      'SELECT id, created_at AS createdAt, expires_at AS expiresAt, max_uses AS maxUses, uses, revoked_at AS revokedAt FROM invites ORDER BY id',
+    ),
+    revokeInvite: db.prepare('UPDATE invites SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL'),
     people: db.prepare(`
       SELECT u.handle, u.display_name AS displayName, p.last_seen AS lastSeen, p.label
       FROM users u LEFT JOIN presence p ON p.handle = u.handle
@@ -192,6 +212,55 @@ export function openStore(path = ':memory:') {
         Number(q.purgeAcked.run(cutoffs.ackedBefore).changes) +
         Number(q.purgeStale.run(cutoffs.staleBefore).changes)
       )
+    },
+
+    /** Creates an invite and returns its code, which is stored only as a hash. */
+    createInvite(options: { maxUses: number; ttlMs: number }, now = Date.now()): { id: number; code: string } {
+      const code = `inv_${randomBytes(32).toString('base64url')}`
+      const { lastInsertRowid } = q.addInvite.run(sha256(code), now, now + options.ttlMs, options.maxUses)
+      return { id: Number(lastInsertRowid), code }
+    },
+
+    /**
+     * Spends one use of an invite to add a person, all or nothing. Throws an
+     * Error whose `code` is `invite_invalid` or `handle_taken`.
+     */
+    redeemInvite(code: string, handle: string, displayName: string, now = Date.now()): string {
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        const invite = q.inviteByHash.get(sha256(code)) as
+          | { id: number; expiresAt: number; maxUses: number; uses: number; revokedAt: number | null }
+          | undefined
+        if (!invite || invite.revokedAt !== null || invite.expiresAt <= now || invite.uses >= invite.maxUses) {
+          throw Object.assign(new Error('This invite is not valid any more. Ask for a new one.'), {
+            code: 'invite_invalid',
+          })
+        }
+        if (q.byHandle.get(handle)) {
+          throw Object.assign(new Error(`The handle @${handle} is taken. Pick another.`), { code: 'handle_taken' })
+        }
+        const token = this.addUser(handle, displayName, now)
+        q.useInvite.run(invite.id)
+        db.exec('COMMIT')
+        return token
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+    },
+
+    listInvites: () =>
+      q.invites.all() as unknown as {
+        id: number
+        createdAt: number
+        expiresAt: number
+        maxUses: number
+        uses: number
+        revokedAt: number | null
+      }[],
+
+    revokeInvite(id: number, now = Date.now()): boolean {
+      return Number(q.revokeInvite.run(now, id).changes) > 0
     },
 
     touchPresence(handle: string, label: string | null, now = Date.now()): void {

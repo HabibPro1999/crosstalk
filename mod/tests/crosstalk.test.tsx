@@ -4,6 +4,8 @@ import type { HttpInit, HttpResponse, On } from 'claude-code'
 import type { InboxMessage } from '../hooks/protocol'
 
 const TOKEN = 'ct_' + 'a'.repeat(43)
+const INVITE_CODE = 'inv_' + 'b'.repeat(43)
+const INVITE = `https://relay.example.com#${INVITE_CODE}`
 const OPTIONS = { relayUrl: 'http://127.0.0.1:7878', token: TOKEN, approveOutgoing: 'on' }
 
 const TYPED = {
@@ -32,6 +34,7 @@ function fakeRelay() {
     sent: [] as { to: string; text: string; replyTo?: number }[],
     acks: [] as { ids: number[]; action: string }[],
     requests: [] as { method: string; url: string; auth?: string }[],
+    joins: [] as Record<string, unknown>[],
     nextId: 100,
   }
   const json = (status: number, body: unknown): HttpResponse => ({
@@ -44,9 +47,17 @@ function fakeRelay() {
     const method = init.method ?? 'GET'
     const auth = init.headers?.authorization
     state.requests.push({ method, url, auth })
-    if (auth !== `Bearer ${TOKEN}`) return json(401, { error: 'unauthorized', message: 'bad token' })
-    const { pathname, searchParams } = new URL(url)
+    const { pathname, searchParams, hostname } = new URL(url)
     const body = init.body ? JSON.parse(init.body) : {}
+    if (hostname === 'down.example.com') return json(502, { error: 'server_error', message: 'bad gateway' })
+    if (`${method} ${pathname}` === 'POST /v1/join') {
+      state.joins.push(body)
+      if (body.invite !== INVITE_CODE) {
+        return json(403, { error: 'invite_invalid', message: 'This invite is not valid any more.' })
+      }
+      return json(201, { handle: body.handle, displayName: body.displayName, token: TOKEN })
+    }
+    if (auth !== `Bearer ${TOKEN}`) return json(401, { error: 'unauthorized', message: 'bad token' })
     switch (`${method} ${pathname}`) {
       case 'GET /v1/me':
         return json(200, { handle: 'alice', displayName: 'Alice A' })
@@ -347,5 +358,113 @@ describe('who', () => {
     const result = await $.tool.call({ tool: 'mcp__crosstalk__who' })
     expect(String(result.result)).toContain('● @alice (you): Alice A, online in web')
     expect(String(result.result)).toContain('○ @bob: Bob B, offline')
+  })
+})
+
+describe('joining', () => {
+  function settings(on: On, isAllowed: boolean) {
+    const written: Record<string, unknown> = {}
+    on('config.set', (_, e) => {
+      if (!isAllowed) return { deny: 'only its dialog changes it' }
+      written[e.key] = e.value
+      return { value: e.value }
+    })
+    return written
+  }
+
+  test('join with an invite saves into settings and connects', { options: { token: '' } }, async ($, on) => {
+    const clock = mock.clock(on)
+    mock.store(on)
+    const relay = fakeRelay()
+    engine(on, relay)
+    const written = settings(on, true)
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+
+    const ran = await $.command.run({ command: 'crosstalk', args: `join ${INVITE} @Dana Dana D`, ...TYPED })
+    expect(ran.text).toContain('Joined crosstalk as @dana')
+    expect(ran.text).toContain('secure storage')
+    expect(ran.text).not.toContain(TOKEN)
+    expect(relay.state.joins).toEqual([{ invite: INVITE_CODE, handle: 'dana', displayName: 'Dana D' }])
+    expect(written).toEqual({ 'crosstalk.relayUrl': 'https://relay.example.com', 'crosstalk.token': TOKEN })
+
+    await clock.settle()
+    const polled = relay.state.requests.find(r => r.url.startsWith('https://relay.example.com/v1/inbox'))
+    expect(polled?.auth).toBe(`Bearer ${TOKEN}`)
+  })
+
+  test('when settings refuse, join keeps the token in the mod store', { options: { token: '' } }, async ($, on) => {
+    mock.clock(on)
+    const stored: Record<string, unknown> = {}
+    on('store.get', (_, e) => ({ value: stored[e.key] }))
+    on('store.set', (_, e) => {
+      stored[e.key] = e.value
+      return { value: undefined }
+    })
+    on('store.delete', (_, e) => {
+      delete stored[e.key]
+      return { value: undefined }
+    })
+    const relay = fakeRelay()
+    engine(on, relay)
+    settings(on, false)
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: false })
+
+    const ran = await $.command.run({ command: 'crosstalk', args: `join ${INVITE} dana`, ...TYPED })
+    expect(ran.text).toContain("mod's own storage")
+    const who = await $.tool.call({ tool: 'mcp__crosstalk__who' })
+    expect(String(who.result)).toContain('@bob')
+    expect(stored.credentials).toEqual({
+      relayUrl: 'https://relay.example.com',
+      token: TOKEN,
+      handle: 'dana',
+    })
+  })
+
+  test('a session starts from credentials an earlier join stored', { options: { token: '' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { credentials: { relayUrl: 'https://relay.example.com', token: TOKEN, handle: 'alice' } })
+    engine(on, fakeRelay())
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: false })
+    const who = await $.tool.call({ tool: 'mcp__crosstalk__who' })
+    expect(String(who.result)).toContain('@alice (you)')
+  })
+
+  test('a bad or spent invite changes nothing', { options: { token: '' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    const relay = fakeRelay()
+    engine(on, relay)
+    const written = settings(on, true)
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: false })
+
+    const usage = await $.command.run({ command: 'crosstalk', args: 'join not-an-invite dana', ...TYPED })
+    expect(usage.text).toContain('Usage')
+    const spent = `https://relay.example.com#inv_${'c'.repeat(43)}`
+    const refused = await $.command.run({ command: 'crosstalk', args: `join ${spent} dana`, ...TYPED })
+    expect(refused.text).toContain('not valid any more')
+    const plain = await $.command.run({
+      command: 'crosstalk',
+      args: `join http://relay.example.com#${INVITE_CODE} dana`,
+      ...TYPED,
+    })
+    expect(plain.text).toContain('https')
+    expect(written).toEqual({})
+  })
+
+  test('/crosstalk url switches only to an address that accepts the token', { options: OPTIONS }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    engine(on, fakeRelay())
+    const written = settings(on, true)
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: false })
+
+    const bad = await $.command.run({ command: 'crosstalk', args: 'url https://down.example.com', ...TYPED })
+    expect(bad.text).toContain('Kept the old address')
+    const status = await $.command.run({ command: 'crosstalk', args: 'status', ...TYPED })
+    expect(status.text).toContain('http://127.0.0.1:7878')
+
+    const good = await $.command.run({ command: 'crosstalk', args: 'url https://new.example.com/', ...TYPED })
+    expect(good.text).toContain('now uses https://new.example.com, as @alice')
+    expect(written['crosstalk.relayUrl']).toBe('https://new.example.com')
   })
 })
