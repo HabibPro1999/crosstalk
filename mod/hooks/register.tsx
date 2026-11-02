@@ -33,6 +33,7 @@ import {
   describeError,
   formatPeople,
   isSavedCredentials,
+  isTrustedSender,
   newLocalId,
   normalizeHandle,
   parseDm,
@@ -81,6 +82,8 @@ const session = {
   isLoaded: false,
   /** Set when the settings cannot work; no restart is tried until they change. */
   isParked: false,
+  /** When each sender's messages were last delivered straight to Claude (the loop guard). */
+  directTimes: new Map<string, number[]>(),
   timer: undefined as { cancel(): void } | undefined,
 }
 
@@ -224,8 +227,13 @@ async function poll($: $): Promise<void> {
     const current = await read($, connection)
     if (current.status !== 'online') await setConnection($, { status: 'online', handle: me.handle, detail: null })
     const fresh = await mergeInbox($, res)
-    if (fresh.length > 0) {
-      const senders = [...new Set(fresh.map(m => `@${m.from}`))].join(', ')
+    const waiting: InboxMessage[] = []
+    for (const message of fresh) {
+      const isDirect = mayDeliverDirect(message.from) && (await deliverDirect($, message))
+      if (!isDirect) waiting.push(message)
+    }
+    if (waiting.length > 0) {
+      const senders = [...new Set(waiting.map(m => `@${m.from}`))].join(', ')
       $.ui.toast(`crosstalk: new message from ${senders}. Open it with /crosstalk.`)
       void $.ui.notify(`New message from ${senders}`, { title: 'crosstalk' }).catch(() => {})
     }
@@ -274,6 +282,31 @@ async function accept($: $, id: number): Promise<void> {
   // A turn of its own once the session is idle, framed as a plugin's message
   // carrying another person's words: never `asUser`.
   void $.prompt.submit({ text: envelope(message, session.me?.handle ?? 'you') })
+}
+
+/** Messages one sender may deliver straight to Claude per minute before they wait for approval. */
+const DIRECT_PER_MINUTE = 6
+
+function mayDeliverDirect(from: string): boolean {
+  if (!isTrustedSender(from, session.config.autoDeliverFrom)) return false
+  const now = Date.now()
+  const recent = (session.directTimes.get(from) ?? []).filter(at => at > now - 60_000)
+  session.directTimes.set(from, recent)
+  if (recent.length >= DIRECT_PER_MINUTE) return false
+  recent.push(now)
+  return true
+}
+
+/**
+ * Hands a trusted sender's message to Claude as this person's own prompt:
+ * exactly the text, no frame, no approval (`autoDeliverFrom`).
+ */
+async function deliverDirect($: $, message: InboxMessage): Promise<boolean> {
+  const acked = await acknowledge($, message.id, 'accepted')
+  if (!acked) return false
+  void $.prompt.submit({ text: message.text, asUser: true })
+  $.ui.toast(`crosstalk: @${message.from}'s message went to Claude.`)
+  return true
 }
 
 async function dismiss($: $, id: number): Promise<void> {

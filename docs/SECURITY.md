@@ -18,6 +18,18 @@ crosstalk connects two things that can each act on a computer: Claude Code sessi
 | **Relay as a data store.** | Unread messages are deleted after 7 days and read ones after 24 hours. The audit log records metadata and a body hash only, unless `CROSSTALK_AUDIT_CONTENT=1`. | `DEFAULT_LIMITS` |
 | **Control characters and invisible text.** Bidi overrides or zero-width characters hide instructions. | `cleanText` strips C0 controls, zero-width characters and bidi overrides on both client and relay. | `protocol.ts` |
 
+## Trusted delivery (`autoDeliverFrom`) turns the main control off, on purpose
+
+A recipient can list colleagues whose messages go **straight to Claude as the recipient's own prompt**, with no approval and no "untrusted" frame. For those senders, the gate in the first row of the table above does not exist. Anything they send runs with the recipient's permissions, and in bypass-permissions or `dontAsk` sessions that includes shell commands.
+
+What still applies:
+- **Only the recipient can turn it on,** per sender or `*`, in their own `/config`.
+- **Senders are identified by token,** so a stranger needs a live invite to join, and a handle that isn't on the list still waits.
+- **A loop guard** sends a sender's messages back to approval after 6 a minute.
+- **The relay's limits** still hold.
+
+Use it only for people you'd let type into your terminal. Prefer named handles over `*`, since `*` includes anyone who joins with an invite.
+
 ## What crosstalk does not protect against
 
 - **A person who reads a malicious message and tells Claude to do it anyway.** The gate is a human decision, not a sandbox.

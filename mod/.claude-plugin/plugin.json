@@ -1,6 +1,6 @@
 {
   "name": "crosstalk",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Message colleagues' Claude Code sessions through your organization's crosstalk relay. You approve every message in both directions.",
   "author": {
     "name": "HabibPro1999"
@@ -18,6 +18,12 @@
       "title": "Your crosstalk token",
       "description": "The personal token your relay admin gave you (starts with ct_). Kept in secure storage.",
       "sensitive": true,
+      "default": ""
+    },
+    "autoDeliverFrom": {
+      "type": "string",
+      "title": "Deliver straight to Claude from",
+      "description": "Colleagues whose messages go to Claude at once as a plain prompt, exactly their text, as if you typed it: handles separated by commas (e.g. \"medyas, sara\"), or * for anyone on the relay. Their messages skip approval and Claude acts on them with your permissions. Others still wait in the inbox.",
       "default": ""
     },
     "approveOutgoing": {

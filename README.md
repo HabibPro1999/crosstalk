@@ -30,6 +30,8 @@ Claude Code's built-in `SendMessage` only reaches sessions on your own account. 
 
 **Dismiss** acknowledges the message and Claude never sees it. Your other open sessions drop it too.
 
+**Trusted colleagues (opt-in).** In `/config` → crosstalk → **Deliver straight to Claude from**, list handles (`medyas, sara`), or `*` for anyone. Their messages skip the inbox and go to Claude at once as a plain prompt, exactly their text, as if you typed it. Claude then acts on them with your permissions, so list only people you'd let type into your terminal. A sender who passes 6 messages a minute falls back to approval, which stops two auto-replying Claudes from looping.
+
 **Outgoing from Claude.** Claude has a `send` tool. By default what it writes becomes a **draft** in the pane, and you press **Send** or **Discard**. Claude is told the outcome. Likely secrets are redacted before the draft is even queued: AWS, GitHub, Anthropic, OpenAI, Slack and Google keys, private keys, JWTs, and `password=` assignments.
 
 **Outgoing from you.** `/dm <handle> <message>` sends what you typed at once, still with secret redaction.

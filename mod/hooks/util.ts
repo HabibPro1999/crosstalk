@@ -8,6 +8,8 @@ export type Config = {
   relayUrl: string
   token: string
   approveOutgoing: boolean
+  /** Senders whose messages go straight to Claude as a plain prompt: handles, or '*' for anyone. */
+  autoDeliverFrom: readonly string[] | '*'
   waitSeconds: number
   /** Why the mod cannot talk to the relay, or null when it can. */
   problem: string | null
@@ -51,6 +53,7 @@ export function readConfig(options: Readonly<Record<string, unknown>>): Config {
     relayUrl,
     token,
     approveOutgoing: options.approveOutgoing !== 'off',
+    autoDeliverFrom: parseSenders(options.autoDeliverFrom),
     waitSeconds: Number.isFinite(wait) ? Math.min(MAX_WAIT_SECONDS, Math.max(1, Math.round(wait))) : 20,
     problem,
   }
@@ -125,4 +128,18 @@ export function parseJoin(args: string): JoinArgs | null {
   const handle = normalizeHandle(rawHandle)
   if (!invite || !handle) return null
   return { invite, handle, displayName: name.join(' ').trim() || handle }
+}
+
+/** Reads the "deliver straight to Claude from" setting: '*', or a list of handles. */
+export function parseSenders(value: unknown): readonly string[] | '*' {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text === '*') return '*'
+  return text
+    .split(/[\s,]+/)
+    .map(normalizeHandle)
+    .filter((h): h is string => h !== null)
+}
+
+export function isTrustedSender(handle: string, trusted: readonly string[] | '*'): boolean {
+  return trusted === '*' || trusted.includes(handle)
 }

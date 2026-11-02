@@ -96,6 +96,7 @@ function fakeRelay() {
 function engine(on: On, relay: ReturnType<typeof fakeRelay>) {
   const seen = {
     prompts: [] as string[],
+    origins: [] as unknown[],
     toasts: [] as string[],
     statuses: [] as (string | undefined)[],
     opened: [] as string[],
@@ -127,13 +128,14 @@ function engine(on: On, relay: ReturnType<typeof fakeRelay>) {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => {
     seen.prompts.push(e.text)
+    seen.origins.push(e.origin)
     return { text: e.text }
   })
   return seen
 }
 
-function message(id: number, text: string): InboxMessage {
-  return { id, from: 'bob', fromName: 'Bob B', text, replyTo: null, createdAt: 0 }
+function message(id: number, text: string, from = 'bob'): InboxMessage {
+  return { id, from, fromName: `${from} name`, text, replyTo: null, createdAt: 0 }
 }
 
 describe('setup', () => {
@@ -480,5 +482,62 @@ describe('joining', () => {
     const good = await $.command.run({ command: 'crosstalk', args: 'url https://new.example.com/', ...TYPED })
     expect(good.text).toContain('now uses https://new.example.com, as @alice')
     expect(written['crosstalk.relayUrl']).toBe('https://new.example.com')
+  })
+})
+
+describe('trusted senders', () => {
+  test("a trusted sender's message goes to Claude at once, as exactly their text", {
+    options: { ...OPTIONS, autoDeliverFrom: '@Bob, sara' },
+  }, async ($, on) => {
+    const clock = mock.clock(on)
+    const relay = fakeRelay()
+    const seen = engine(on, relay)
+    relay.state.open.push(message(20, 'run the migration tests and tell me what fails'))
+    relay.state.open.push(message(21, 'hello from carol', 'carol'))
+
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+    await clock.settle()
+
+    expect(seen.prompts).toEqual(['run the migration tests and tell me what fails'])
+    expect(JSON.stringify(seen.origins[0])).toContain('"asUser":true')
+    expect(relay.state.acks).toEqual([{ ids: [20], action: 'accepted' }])
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /migration tests/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /hello from carol/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('* trusts everyone on the relay', { options: { ...OPTIONS, autoDeliverFrom: '*' } }, async ($, on) => {
+    const clock = mock.clock(on)
+    const relay = fakeRelay()
+    const seen = engine(on, relay)
+    relay.state.open.push(message(30, 'one', 'carol'), message(31, 'two', 'dan'))
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    expect(seen.prompts).toEqual(['one', 'two'])
+  })
+
+  test('a burst from one sender falls back to approval after 6 a minute', {
+    options: { ...OPTIONS, autoDeliverFrom: 'bob' },
+  }, async ($, on) => {
+    const clock = mock.clock(on)
+    const relay = fakeRelay()
+    const seen = engine(on, relay)
+    for (let i = 0; i < 8; i++) relay.state.open.push(message(40 + i, `ping ${i}`))
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    expect(seen.prompts.length).toBe(6)
+    expect(relay.state.open.map(m => m.id)).toEqual([46, 47])
+  })
+
+  test('with the setting empty, every message waits for approval', { options: OPTIONS }, async ($, on) => {
+    const clock = mock.clock(on)
+    const relay = fakeRelay()
+    const seen = engine(on, relay)
+    relay.state.open.push(message(50, 'hi'))
+    await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    expect(seen.prompts).toEqual([])
   })
 })
